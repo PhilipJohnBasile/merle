@@ -470,7 +470,17 @@ fn agent_system(repo: &str) -> serde_json::Value {
 
 fn cmd_do(task: &str, repo: &str, test: Option<String>, max_steps: usize) -> i32 {
     let tools = tool_schemas();
-    let mut messages = vec![agent_system(repo), serde_json::json!({"role":"user","content":task})];
+    let mut messages = vec![agent_system(repo)];
+    // seed the agent with callsieve-localized relevant code — better localization + fewer wandering
+    // read/grep tool calls. Capped short: the model degrades on long context.
+    if let Ok(files) = callsieve_context(repo, task) {
+        if !files.is_empty() {
+            println!("\x1b[36m● callsieve seeded {} relevant file(s)\x1b[0m", files.len());
+            let ctx: String = files.join("\n\n").chars().take(3000).collect();
+            messages.push(serde_json::json!({"role":"system","content":format!("Relevant repo code (callsieve-localized for the task):\n\n{ctx}")}));
+        }
+    }
+    messages.push(serde_json::json!({"role":"user","content":task}));
     run_agent_turn(&mut messages, &tools, repo, max_steps, test.as_deref()); // streams live
     if let Some(t) = test {
         let ok = run(&t, repo).0 == 0;
