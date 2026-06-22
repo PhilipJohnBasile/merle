@@ -165,10 +165,17 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
         _ => ".".to_string(),
     });
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or(file);
-    let original = match fs::read_to_string(file) {
+    // resolve the file WITHIN the repo so `merle fix ms.py --repo /x` reads /x/ms.py (where the test runs),
+    // not ./ms.py relative to the shell's cwd.
+    let fpath: String = if path.is_absolute() {
+        file.to_string()
+    } else {
+        format!("{}/{}", repo.trim_end_matches('/'), file)
+    };
+    let original = match fs::read_to_string(&fpath) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("✗ can't read {file}: {e}");
+            eprintln!("✗ can't read {fpath}: {e}");
             return 2;
         }
     };
@@ -192,7 +199,7 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
             continue;
         }
         let written = format!("{cand}\n");
-        let _ = fs::write(file, &written);
+        let _ = fs::write(&fpath, &written);
         let (rc_v, fail2) = run(test, &repo);
         if rc_v == 0 {
             println!("\x1b[32m✓ candidate {} PASSES — verified fix applied:\x1b[0m", i + 1);
@@ -220,7 +227,7 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
         let cand2 = extract_code(&ask(&reflect, 0.3, 1400));
         if !cand2.is_empty() && cand2.trim() != written.trim() && cand2.trim() != original.trim() {
             let w2 = format!("{cand2}\n");
-            let _ = fs::write(file, &w2);
+            let _ = fs::write(&fpath, &w2);
             if run(test, &repo).0 == 0 {
                 println!("\x1b[32m✓ candidate {} PASSES after Reflexion — verified fix applied:\x1b[0m", i + 1);
                 show_diff(name, &original, &w2);
@@ -232,7 +239,7 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
             }
         }
         println!("  candidate {}: still failing (incl. reflexion)", i + 1);
-        let _ = fs::write(file, &original); // revert before next try
+        let _ = fs::write(&fpath, &original); // revert before next try
     }
     println!("\x1b[31m✗ no verified fix in {n} candidates (file unchanged). Try --n higher.\x1b[0m");
     1
