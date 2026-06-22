@@ -74,6 +74,10 @@ fn ask(prompt: &str, temp: f64, max_tokens: u32) -> String {
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temp,
         "max_tokens": max_tokens,
+        // REQUIRED for the 3-bit model: without it, low-temp decode collapses into a repeat loop
+        // ("you'd you'd you'd…") and burns the full max_tokens. The gateway adds this; merle must too.
+        "top_p": 0.95,
+        "repetition_penalty": 1.15,
         "chat_template_kwargs": {"enable_thinking": false}
     });
     match agent.post(&base()).send_json(body) {
@@ -253,7 +257,8 @@ fn execute_tool(name: &str, args: &serde_json::Value, repo: &str) -> String {
 fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) -> serde_json::Value {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(600)).build();
     let body = serde_json::json!({
-        "messages": messages, "tools": tools, "temperature": 0.3, "max_tokens": 1024,
+        "messages": messages, "tools": tools, "temperature": 0.3, "max_tokens": 700,
+        "top_p": 0.95, "repetition_penalty": 1.15,
         "chat_template_kwargs": {"enable_thinking": false}
     });
     agent.post(&base()).send_json(body).ok()
