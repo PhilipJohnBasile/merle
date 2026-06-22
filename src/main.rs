@@ -193,7 +193,8 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
         }
         let written = format!("{cand}\n");
         let _ = fs::write(file, &written);
-        if run(test, &repo).0 == 0 {
+        let (rc_v, fail2) = run(test, &repo);
+        if rc_v == 0 {
             println!("\x1b[32m✓ candidate {} PASSES — verified fix applied:\x1b[0m", i + 1);
             show_diff(name, &original, &written);
             if commit {
@@ -209,7 +210,28 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
             }
             return 0;
         }
-        println!("  candidate {}: still failing", i + 1);
+        // #118 Reflexion: one self-critique retry feeding the failed attempt's NEW error back, before
+        // spending the next independent candidate — cheap, and leverages the verifier signal directly.
+        let reflect = format!(
+            "{prompt}\n=== your previous attempt STILL FAILED with ===\n{}\n\
+             === reflect on exactly WHY it failed, then output the corrected full file ===\n",
+            tail(&fail2, 600)
+        );
+        let cand2 = extract_code(&ask(&reflect, 0.3, 1400));
+        if !cand2.is_empty() && cand2.trim() != written.trim() && cand2.trim() != original.trim() {
+            let w2 = format!("{cand2}\n");
+            let _ = fs::write(file, &w2);
+            if run(test, &repo).0 == 0 {
+                println!("\x1b[32m✓ candidate {} PASSES after Reflexion — verified fix applied:\x1b[0m", i + 1);
+                show_diff(name, &original, &w2);
+                if commit {
+                    let (rc, _) = run(&format!("git add {file} && git commit -q -m 'merle: verified fix (reflexion)'"), &repo);
+                    println!("{}", if rc == 0 { "\x1b[32m  ✓ committed\x1b[0m" } else { "\x1b[33m  (commit skipped)\x1b[0m" });
+                }
+                return 0;
+            }
+        }
+        println!("  candidate {}: still failing (incl. reflexion)", i + 1);
         let _ = fs::write(file, &original); // revert before next try
     }
     println!("\x1b[31m✗ no verified fix in {n} candidates (file unchanged). Try --n higher.\x1b[0m");
