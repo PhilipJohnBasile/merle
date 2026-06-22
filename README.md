@@ -22,6 +22,15 @@ merle  →  localize (callsieve)  →  local model  →  best-of-N  →  run you
 It talks to a local MLX model server (default `http://localhost:8080`, set `MERLE_BASE` to change).
 Pair it with the GLM-5.2-Demolition model + serve, or any OpenAI-compatible local endpoint.
 
+
+## Surfaces — one engine, three faces
+merle is the *engine* (localize → model → best-of-N → verify → repair). You reach it however you like:
+- **CLI** — `merle fix / do / explain` — *available now*
+- **Desktop** — a native SwiftUI macOS app — *planned*
+- **VS Code** — an extension — *planned*
+
+All three are thin, native clients that talk to the same local engine; the model runs on your machine.
+
 ## Install
 ```
 git clone <this repo> && cd merle
