@@ -57,6 +57,14 @@ enum Cmd {
         #[arg(long, default_value_t = 16)]
         max_steps: usize,
     },
+    /// Show the code that's relevant to a task — embedded callsieve retrieval.
+    Context {
+        /// What you're trying to do
+        task: String,
+        /// Repo / working dir
+        #[arg(long, default_value = ".")]
+        repo: String,
+    },
 }
 
 /// One blocking chat call to the local model server. No `model` field — the serve serves what's loaded.
@@ -254,7 +262,14 @@ fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) ->
 }
 
 /// Run the agent until it gives a final text answer / calls `done` / hits max_steps. Returns its summary.
-fn run_agent_turn(messages: &mut Vec<serde_json::Value>, tools: &serde_json::Value, repo: &str, max_steps: usize) -> String {
+fn run_agent_turn(
+    messages: &mut Vec<serde_json::Value>,
+    tools: &serde_json::Value,
+    repo: &str,
+    max_steps: usize,
+    test: Option<&str>,
+) -> String {
+    let mut edited = false;
     for _ in 0..max_steps {
         let msg = chat_with_tools(messages, tools)["choices"][0]["message"].clone();
         messages.push(msg.clone());
@@ -269,12 +284,24 @@ fn run_agent_turn(messages: &mut Vec<serde_json::Value>, tools: &serde_json::Val
                     println!("\x1b[36m  ● {name} {}\x1b[0m", trunc(&args.to_string(), 100).replace('\n', " "));
                     let result = execute_tool(name, &args, repo);
                     messages.push(serde_json::json!({"role":"tool","tool_call_id":call["id"].clone(),"content":result}));
+                    if name == "write_file" {
+                        edited = true;
+                    }
                     if name == "done" {
                         finished = Some(args["summary"].as_str().unwrap_or("done").to_string());
                     }
                 }
                 if let Some(f) = finished {
                     return f;
+                }
+                // Verifier-gated early termination: if the model has edited something and the tests now
+                // pass, we're verifiably done — don't wait for the model to remember to call `done`.
+                if edited {
+                    if let Some(t) = test {
+                        if run(t, repo).0 == 0 {
+                            return "verified — tests pass".to_string();
+                        }
+                    }
                 }
             }
             _ => return msg["content"].as_str().unwrap_or("").to_string(),
@@ -294,7 +321,8 @@ fn agent_system(repo: &str) -> serde_json::Value {
 fn cmd_do(task: &str, repo: &str, test: Option<String>, max_steps: usize) -> i32 {
     let tools = tool_schemas();
     let mut messages = vec![agent_system(repo), serde_json::json!({"role":"user","content":task})];
-    println!("\x1b[32m✓ {}\x1b[0m", run_agent_turn(&mut messages, &tools, repo, max_steps));
+    let summary = run_agent_turn(&mut messages, &tools, repo, max_steps, test.as_deref());
+    println!("\x1b[32m✓ {summary}\x1b[0m");
     if let Some(t) = test {
         let ok = run(&t, repo).0 == 0;
         println!("{}", if ok { "\x1b[32m✓ tests pass — verified\x1b[0m" } else { "\x1b[31m✗ tests fail\x1b[0m" });
@@ -325,13 +353,42 @@ fn repl(repo: &str) -> i32 {
             break;
         }
         messages.push(serde_json::json!({"role":"user","content":line}));
-        let answer = run_agent_turn(&mut messages, &tools, repo, 16);
+        let answer = run_agent_turn(&mut messages, &tools, repo, 16, None);
         if !answer.is_empty() {
             println!("\x1b[37m{answer}\x1b[0m");
         }
     }
     println!("bye 🐕");
     0
+}
+
+// ---- embedded callsieve: relevant-code retrieval, compiled into the merle binary --------------
+
+fn callsieve_context(repo: &str, task: &str) -> Result<Vec<String>, String> {
+    let root = std::path::Path::new(repo);
+    let index = callsieve::indexer::build_index(root).map_err(|e| e.to_string())?;
+    let ctx = callsieve::query::build_context(root, &index, task, 6, 2, true).map_err(|e| e.to_string())?;
+    Ok(callsieve::query::context_read_first_files(&ctx))
+}
+
+fn cmd_context(task: &str, repo: &str) -> i32 {
+    match callsieve_context(repo, task) {
+        Ok(files) if !files.is_empty() => {
+            println!("\x1b[36m● callsieve: {} relevant file(s) for \"{task}\"\x1b[0m", files.len());
+            for f in &files {
+                println!("  {f}");
+            }
+            0
+        }
+        Ok(_) => {
+            println!("(callsieve found nothing relevant — try a more specific task)");
+            0
+        }
+        Err(e) => {
+            eprintln!("✗ callsieve: {e}");
+            1
+        }
+    }
 }
 
 fn main() {
@@ -343,6 +400,7 @@ fn main() {
         Some(Cmd::Fix { file, test, n, repo, commit }) => cmd_fix(&file, &test, n, repo, commit),
         Some(Cmd::Explain { file }) => cmd_explain(&file),
         Some(Cmd::Do { task, repo, test, max_steps }) => cmd_do(&task, &repo, test, max_steps),
+        Some(Cmd::Context { task, repo }) => cmd_context(&task, &repo),
     };
     std::process::exit(code);
 }
