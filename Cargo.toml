@@ -1,0 +1,23 @@
+[package]
+name = "merle"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "all-local, verifier-first coding CLI — verify, don't trust"
+authors = ["Philip John Basile"]
+repository = "https://github.com/PhilipJohnBasile/merle"
+
+[[bin]]
+name = "merle"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+similar = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
