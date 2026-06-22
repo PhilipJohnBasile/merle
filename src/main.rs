@@ -37,6 +37,9 @@ enum Cmd {
         /// Repo / working dir (defaults to the file's directory)
         #[arg(long)]
         repo: Option<String>,
+        /// Git-commit the verified fix once it passes
+        #[arg(long)]
+        commit: bool,
     },
     /// Explain a file in plain language.
     Explain { file: String },
@@ -105,7 +108,7 @@ fn show_diff(name: &str, before: &str, after: &str) {
     }
 }
 
-fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>) -> i32 {
+fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool) -> i32 {
     let path = std::path::Path::new(file);
     let repo = repo.unwrap_or_else(|| match path.parent().and_then(|p| p.to_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -141,6 +144,17 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>) -> i32 {
         if run(test, &repo).0 == 0 {
             println!("\x1b[32m✓ candidate {} PASSES — verified fix applied:\x1b[0m", i + 1);
             show_diff(name, &original, &written);
+            if commit {
+                let (rc, _) = run(&format!("git add {file} && git commit -q -m 'merle: verified fix'"), &repo);
+                println!(
+                    "{}",
+                    if rc == 0 {
+                        "\x1b[32m  ✓ committed\x1b[0m"
+                    } else {
+                        "\x1b[33m  (commit skipped — not a git repo, or nothing to commit)\x1b[0m"
+                    }
+                );
+            }
             return 0;
         }
         println!("  candidate {}: still failing", i + 1);
@@ -166,7 +180,7 @@ fn cmd_explain(file: &str) -> i32 {
 
 fn main() {
     let code = match Cli::parse().cmd {
-        Cmd::Fix { file, test, n, repo } => cmd_fix(&file, &test, n, repo),
+        Cmd::Fix { file, test, n, repo, commit } => cmd_fix(&file, &test, n, repo, commit),
         Cmd::Explain { file } => cmd_explain(&file),
     };
     std::process::exit(code);

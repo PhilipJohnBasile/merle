@@ -31,6 +31,15 @@ merle is the *engine* (localize → model → best-of-N → verify → repair). 
 
 All three are thin, native clients that talk to the same local engine; the model runs on your machine.
 
+
+## Batteries included — one binary, everything
+`merle` bundles its sibling Rust crates, so one install gives you the whole stack:
+- **callsieve** — code retrieval / bug localization (embedded as a library)
+- **vecstore** — cross-session memory (embedded as a library)
+
+`cargo install merle` (or `brew install merle`) compiles them *into* the single `merle` binary —
+no separate downloads, no Python runtime. Only the MLX model server runs as a separate local service.
+
 ## Install
 ```
 git clone <this repo> && cd merle
