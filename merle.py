@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""coder — the all-local, verifier-first coding CLI. End-to-end ours: M5 + MLX model, our retrieval, our
+"""merle — the all-local, verifier-first coding CLI. End-to-end ours: M5 + MLX model, our retrieval, our
 execution-verifiers, no cloud. The differentiator vs aider/Cline: it doesn't just ask the model — it
 LOCALIZES (callsieve) → generates N candidates → VERIFIES each by running your tests → keeps only a fix
 that actually passes → repairs on failure. The model is never trusted; the test is.
 
-  coder fix calc.py --test "pytest -q"          # verified-fix loop (the core)
-  coder do  "add input validation" --repo . --test "cargo test"   # the agentic loop (ReAct)
-  coder explain src/query/tokens.rs             # plain explanation
+  merle fix calc.py --test "pytest -q"          # verified-fix loop (the core)
+  merle do  "add input validation" --repo . --test "cargo test"   # the agentic loop (ReAct)
+  merle explain src/query/tokens.rs             # plain explanation
 
-Points at our local serve via the gateway (:8090 — sampling defaults + native tools). Set CODER_BASE to override.
+Points at our local serve via the gateway (:8090 — sampling defaults + native tools). Set MERLE_BASE to override.
 """
 import argparse
 import json
@@ -20,7 +20,7 @@ import urllib.request
 # Talk to OUR serve directly (:8080) — we control the request format. The gateway (:8090) is for
 # third-party tools (aider/Cline). Do NOT send a `model` field: mlx_lm.server treats it as a load
 # instruction and 404s/errors trying to fetch it. The serve serves whatever's loaded.
-BASE = os.environ.get("CODER_BASE", "http://localhost:8080/v1")
+BASE = os.environ.get("MERLE_BASE", "http://localhost:8080/v1")
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -87,7 +87,7 @@ def cmd_fix(a):
             return 0
         print(f"  candidate {i+1}: still failing")
         open(path, "w").write(original)            # revert before next try
-    print(C(f"✗ no verified fix in {a.n} candidates (file unchanged). Try --n higher or `coder do`.", "31"))
+    print(C(f"✗ no verified fix in {a.n} candidates (file unchanged). Try --n higher or `merle do`.", "31"))
     return 1
 
 
@@ -95,7 +95,7 @@ def cmd_do(a):
     print(C("● delegating to the agentic loop (57_tool_agent)…", "36"))
     agent = os.path.join(HERE, "57_tool_agent.py")
     if not os.path.exists(agent):
-        print(C("agent script not found; use `coder fix` for single-file fixes.", "31")); return 1
+        print(C("agent script not found; use `merle fix` for single-file fixes.", "31")); return 1
     cmd = [sys.executable, agent, "--repo", a.repo or ".", "--task", a.task]
     if a.test:
         cmd += ["--test", a.test]
@@ -111,7 +111,7 @@ def cmd_explain(a):
 
 
 def main():
-    p = argparse.ArgumentParser(prog="coder", description="all-local verifier-first coding CLI")
+    p = argparse.ArgumentParser(prog="merle", description="all-local verifier-first coding CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fix", help="verified single-file fix")
     f.add_argument("file"); f.add_argument("--test", required=True, help="test command that must pass")
