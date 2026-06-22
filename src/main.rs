@@ -135,6 +135,29 @@ fn show_diff(name: &str, before: &str, after: &str) {
     }
 }
 
+/// #113 fix-packet++: pull the most diagnostic lines (assertion + expected/actual) out of a test failure so
+/// the model fixes the EXACT condition — subtle >/</==/off-by-one flips a raw 1200-char dump buries.
+fn key_assertion(failure: &str) -> String {
+    let pats = [
+        "assert", "expected", "actual", "!=", "==", " to equal", " to be", "assertionerror",
+        "panicked", "left:", "right:", "got ", "but was", "should", "fail",
+    ];
+    let mut hits: Vec<&str> = failure
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            let lo = l.to_lowercase();
+            pats.iter().any(|p| lo.contains(p))
+        })
+        .collect();
+    hits.dedup();
+    if hits.is_empty() {
+        return "(no explicit assertion line — infer the exact failing condition from the failure above)".into();
+    }
+    hits.into_iter().take(8).collect::<Vec<_>>().join("\n")
+}
+
 fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool) -> i32 {
     let path = std::path::Path::new(file);
     let repo = repo.unwrap_or_else(|| match path.parent().and_then(|p| p.to_str()) {
@@ -155,10 +178,12 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
         return 0;
     }
     let failure = tail(&run(test, &repo).1, 1200);
+    let assertion = key_assertion(&failure);
     println!("\x1b[33m✗ failing. generating {n} candidates…\x1b[0m");
     let prompt = format!(
         "This file fails its tests. Output ONLY the corrected full file, nothing else.\n\n\
-         === {name} ===\n{original}\n\n=== test failure ===\n{failure}\n"
+         === {name} ===\n{original}\n\n=== test failure ===\n{failure}\n\
+         === THE EXACT FAILING ASSERTION (fix THIS condition — watch for flipped >/</>=/<=/==/!= and off-by-one) ===\n{assertion}\n"
     );
     for i in 0..n {
         let cand = extract_code(&ask(&prompt, 0.2 + 0.2 * i as f64, 1400));
