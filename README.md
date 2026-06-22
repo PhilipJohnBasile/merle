@@ -1,6 +1,6 @@
 # merle
 
-> *Named after **Gayla**, a blue merle Australian Shepherd — fast, brilliant, tireless, and she herds your code.* 🐕
+> *Named after **Gayla**, a blue merle Australian Shepherd — fast, brilliant, tireless, and she herds your code.* 🐶
 
 
 An **all-local, verifier-first** coding CLI. Your model, your machine, nothing sent to the cloud.

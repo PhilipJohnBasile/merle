@@ -1,4 +1,4 @@
-//! merle — the all-local, verifier-first coding CLI. 🐕
+//! merle — the all-local, verifier-first coding CLI. 🐶
 //!
 //! Named after Gayla, a blue merle Australian Shepherd: fast, brilliant, tireless — she herds your code.
 //! The difference vs other agents: merle never trusts the model, it trusts the TEST. It generates
@@ -17,7 +17,7 @@ fn base() -> String {
 }
 
 #[derive(Parser)]
-#[command(name = "merle", version, about = "all-local, verifier-first coding CLI 🐕 — verify, don't trust")]
+#[command(name = "merle", version, about = "all-local, verifier-first coding CLI 🐶 — verify, don't trust")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -77,7 +77,8 @@ fn ask(prompt: &str, temp: f64, max_tokens: u32) -> String {
         // REQUIRED for the 3-bit model: without it, low-temp decode collapses into a repeat loop
         // ("you'd you'd you'd…") and burns the full max_tokens. The gateway adds this; merle must too.
         "top_p": 0.95,
-        "repetition_penalty": 1.15,
+        "repetition_penalty": 1.2,
+        "stop": ["</think>", "<think>"],
         "chat_template_kwargs": {"enable_thinking": false}
     });
     match agent.post(&base()).send_json(body) {
@@ -254,16 +255,103 @@ fn execute_tool(name: &str, args: &serde_json::Value, repo: &str) -> String {
     }
 }
 
+/// Detect a 3-bit sentence-loop: the recent ~48-char tail already occurred earlier in the output.
+/// (Token-level repetition_penalty can't catch whole-sentence loops; this client-side guard does.)
+fn is_looping(content: &str) -> bool {
+    let n = content.len();
+    if n < 200 {
+        return false;
+    }
+    let mut cut = n.saturating_sub(48);
+    while cut > 0 && !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let tail = &content[cut..];
+    tail.len() >= 24 && content[..cut].contains(tail)
+}
+
+/// Streaming chat: prints the model's text LIVE as it generates (so the wait feels like typing, not a
+/// hang), and assembles tool-calls from the SSE deltas. Returns the final assistant message.
 fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) -> serde_json::Value {
+    use std::io::{BufRead, Write};
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(600)).build();
     let body = serde_json::json!({
         "messages": messages, "tools": tools, "temperature": 0.3, "max_tokens": 700,
-        "top_p": 0.95, "repetition_penalty": 1.15,
+        "top_p": 0.95, "repetition_penalty": 1.2, "stream": true,
+        // stop at thinking tags: the 3-bit model leaks "</think>" then re-generates the whole reply in a
+        // paragraph loop. Stopping there gives one clean answer.
+        "stop": ["</think>", "<think>"],
         "chat_template_kwargs": {"enable_thinking": false}
     });
-    agent.post(&base()).send_json(body).ok()
-        .and_then(|r| r.into_json::<serde_json::Value>().ok())
-        .unwrap_or_else(|| serde_json::json!({"choices":[{"message":{"content":"(no response — is the model server running on :8080?)"}}]}))
+    let resp = match agent.post(&base()).send_json(body) {
+        Ok(r) => r,
+        Err(_) => return serde_json::json!({"content":"(no response — is the model server running on :8080?)"}),
+    };
+    let reader = std::io::BufReader::new(resp.into_reader());
+    let mut content = String::new();
+    let mut tcalls: Vec<serde_json::Value> = Vec::new();
+    let mut streamed = false;
+    for line in reader.lines().map_while(Result::ok) {
+        let data = match line.strip_prefix("data: ") {
+            Some(d) => d.trim(),
+            None => continue,
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        let chunk: serde_json::Value = match serde_json::from_str(data) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let delta = &chunk["choices"][0]["delta"];
+        if let Some(c) = delta["content"].as_str() {
+            if !c.is_empty() {
+                print!("\x1b[37m{c}\x1b[0m");
+                let _ = std::io::stdout().flush();
+                content.push_str(c);
+                streamed = true;
+                if is_looping(&content) {
+                    break; // 3-bit sentence-loop detected — stop reading the stream
+                }
+            }
+        }
+        if let Some(arr) = delta["tool_calls"].as_array() {
+            for tc in arr {
+                let i = tc["index"].as_u64().unwrap_or(0) as usize;
+                while tcalls.len() <= i {
+                    tcalls.push(serde_json::json!({"id":"","type":"function","function":{"name":"","arguments":""}}));
+                }
+                let a = &mut tcalls[i];
+                if let Some(id) = tc["id"].as_str() {
+                    if !id.is_empty() {
+                        a["id"] = serde_json::json!(id);
+                    }
+                }
+                if let Some(n) = tc["function"]["name"].as_str() {
+                    if !n.is_empty() {
+                        a["function"]["name"] = serde_json::json!(n);
+                    }
+                }
+                if let Some(g) = tc["function"]["arguments"].as_str() {
+                    let cur = a["function"]["arguments"].as_str().unwrap_or("").to_owned();
+                    a["function"]["arguments"] = serde_json::json!(cur + g);
+                }
+            }
+        }
+    }
+    if streamed {
+        println!();
+    }
+    let mut msg = serde_json::json!({"role":"assistant"});
+    if tcalls.is_empty() {
+        msg["content"] = serde_json::json!(content);
+    } else {
+        msg["tool_calls"] = serde_json::json!(tcalls);
+        if !content.is_empty() {
+            msg["content"] = serde_json::json!(content);
+        }
+    }
+    msg
 }
 
 /// Run the agent until it gives a final text answer / calls `done` / hits max_steps. Returns its summary.
@@ -276,7 +364,7 @@ fn run_agent_turn(
 ) -> String {
     let mut edited = false;
     for _ in 0..max_steps {
-        let msg = chat_with_tools(messages, tools)["choices"][0]["message"].clone();
+        let msg = chat_with_tools(messages, tools);
         messages.push(msg.clone());
         match msg["tool_calls"].as_array() {
             Some(calls) if !calls.is_empty() => {
@@ -297,6 +385,7 @@ fn run_agent_turn(
                     }
                 }
                 if let Some(f) = finished {
+                    println!("\x1b[32m  ✓ {f}\x1b[0m");
                     return f;
                 }
                 // Verifier-gated early termination: if the model has edited something and the tests now
@@ -317,7 +406,7 @@ fn run_agent_turn(
 
 fn agent_system(repo: &str) -> serde_json::Value {
     serde_json::json!({"role":"system","content": format!(
-        "You are merle 🐕, an autonomous, verifier-first coding agent working in the repository at '{repo}'. \
+        "You are merle 🐶, an autonomous, verifier-first coding agent working in the repository at '{repo}'. \
          Use the tools (read_file, list_dir, grep, write_file, run) to inspect and edit the code. Make real \
          changes; prefer running tests/builds to verify. When the request is satisfied, summarize and call \
          `done`. Be concise and concrete.")})
@@ -326,8 +415,7 @@ fn agent_system(repo: &str) -> serde_json::Value {
 fn cmd_do(task: &str, repo: &str, test: Option<String>, max_steps: usize) -> i32 {
     let tools = tool_schemas();
     let mut messages = vec![agent_system(repo), serde_json::json!({"role":"user","content":task})];
-    let summary = run_agent_turn(&mut messages, &tools, repo, max_steps, test.as_deref());
-    println!("\x1b[32m✓ {summary}\x1b[0m");
+    run_agent_turn(&mut messages, &tools, repo, max_steps, test.as_deref()); // streams live
     if let Some(t) = test {
         let ok = run(&t, repo).0 == 0;
         println!("{}", if ok { "\x1b[32m✓ tests pass — verified\x1b[0m" } else { "\x1b[31m✗ tests fail\x1b[0m" });
@@ -339,7 +427,7 @@ fn cmd_do(task: &str, repo: &str, test: Option<String>, max_steps: usize) -> i32
 /// `merle` with no subcommand: an interactive session — talk to the local model, it acts in this dir.
 fn repl(repo: &str) -> i32 {
     use std::io::Write;
-    println!("\x1b[35mmerle 🐕\x1b[0m — local coding agent in {repo}  (model: GLM-5.2-Demolition). /exit to quit.");
+    println!("\x1b[35mmerle 🐶\x1b[0m — local coding agent in {repo}  (model: GLM-5.2-Demolition). /exit to quit.");
     let tools = tool_schemas();
     let mut messages = vec![agent_system(repo)];
     loop {
@@ -358,12 +446,9 @@ fn repl(repo: &str) -> i32 {
             break;
         }
         messages.push(serde_json::json!({"role":"user","content":line}));
-        let answer = run_agent_turn(&mut messages, &tools, repo, 16, None);
-        if !answer.is_empty() {
-            println!("\x1b[37m{answer}\x1b[0m");
-        }
+        run_agent_turn(&mut messages, &tools, repo, 16, None); // streams live
     }
-    println!("bye 🐕");
+    println!("bye 🐶");
     0
 }
 
