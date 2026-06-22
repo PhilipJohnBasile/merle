@@ -78,7 +78,7 @@ fn ask(prompt: &str, temp: f64, max_tokens: u32) -> String {
         // ("you'd you'd you'd…") and burns the full max_tokens. The gateway adds this; merle must too.
         "top_p": 0.95,
         "repetition_penalty": 1.2,
-        "stop": ["</think>", "<think>"],
+        "stop": ["</think>", "<think>", "<|im_end|>", "<|endoftext|>", "<|eot_id|>"],
         "chat_template_kwargs": {"enable_thinking": false}
     });
     match agent.post(&base()).send_json(body) {
@@ -280,7 +280,7 @@ fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) ->
         "top_p": 0.95, "repetition_penalty": 1.2, "stream": true,
         // stop at thinking tags: the 3-bit model leaks "</think>" then re-generates the whole reply in a
         // paragraph loop. Stopping there gives one clean answer.
-        "stop": ["</think>", "<think>"],
+        "stop": ["</think>", "<think>", "<|im_end|>", "<|endoftext|>", "<|eot_id|>"],
         "chat_template_kwargs": {"enable_thinking": false}
     });
     let resp = match agent.post(&base()).send_json(body) {
