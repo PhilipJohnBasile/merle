@@ -22,6 +22,16 @@ merle  →  localize (callsieve)  →  local model  →  best-of-N  →  run you
 It talks to a local MLX model server (default `http://localhost:8080`, set `MERLE_BASE` to change).
 Pair it with the GLM-5.2-Demolition model + serve, or any OpenAI-compatible local endpoint.
 
+### Choosing a backend
+
+`mlx_lm.server` (Apple's reference implementation) works but is explicitly not built for production use:
+no continuous batching, no cross-call prompt caching, HTTP/1.0 only. For anything beyond quick one-off
+fixes, point `MERLE_BASE` at a backend that actually implements batching and prefix caching — that's
+where the real speed lives for merle's workload (many small verify/repair calls to the same model, same
+repo context, back-to-back), not in the model itself. [oMLX](https://omlx.ai/) is a strong current option:
+continuous batching, a two-tier RAM+SSD KV cache that survives restarts, and it's built directly on
+`mlx-lm` so most models that load in `mlx_lm.server` should load there too.
+
 
 ## Surfaces — one engine, three faces
 merle is the *engine* (localize → model → best-of-N → verify → repair). You reach it however you like:
@@ -32,21 +42,19 @@ merle is the *engine* (localize → model → best-of-N → verify → repair). 
 All three are thin, native clients that talk to the same local engine; the model runs on your machine.
 
 
-## Batteries included — one binary, everything
-`merle` bundles its sibling Rust crates, so one install gives you the whole stack:
-- **callsieve** — code retrieval / bug localization (embedded as a library)
-- **vecstore** — cross-session memory (embedded as a library)
-
-`cargo install merle` (or `brew install merle`) compiles them *into* the single `merle` binary —
-no separate downloads, no Python runtime. Only the MLX model server runs as a separate local service.
+## Batteries included — one binary
+`merle` bundles **callsieve** (tree-sitter-based code retrieval / bug localization) as an embedded
+library, so `cmd_do` gets task-relevant repo context without a separate service. `cargo build --release`
+compiles it *into* the single `merle` binary — no separate downloads, no Python runtime. Only the MLX
+model server runs as a separate local service.
 
 ## Install
 ```
 git clone <this repo> && cd merle
-ln -s "$PWD/merle.py" /usr/local/bin/merle   # or add to PATH
+cargo install --path .   # or: cargo build --release && ln -s "$PWD/target/release/merle" /usr/local/bin/merle
 ```
-Requires Python 3.11+ and a running local model server. Cross-platform; Apple-silicon-native when paired
-with the MLX serve.
+Requires a Rust toolchain to build, and a running local model server to use. Cross-platform;
+Apple-silicon-native when paired with an MLX serve.
 
 ## Status
 Early but proven — `fix` verifies real bugs end-to-end. Roadmap: richer `do` agent loop, git `--commit`,
