@@ -348,7 +348,9 @@ fn is_looping(content: &str) -> bool {
 
 /// Streaming chat: prints the model's text LIVE as it generates (so the wait feels like typing, not a
 /// hang), and assembles tool-calls from the SSE deltas. Returns the final assistant message.
-fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) -> serde_json::Value {
+/// On failure, returns Err with the HTTP status and the server's error body — mlx_lm.server reports
+/// chat-template/generation errors as a 404 with {"error": "..."}, so the body is the diagnosis.
+fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) -> Result<serde_json::Value, String> {
     use std::io::{BufRead, Write};
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(600)).build();
     let body = serde_json::json!({
@@ -361,7 +363,11 @@ fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) ->
     });
     let resp = match agent.post(&base()).send_json(body) {
         Ok(r) => r,
-        Err(_) => return serde_json::json!({"content":"(no response — is the model server running on :8080?)"}),
+        Err(ureq::Error::Status(code, resp)) => {
+            let err_body = resp.into_string().unwrap_or_default();
+            return Err(format!("model server returned HTTP {code}: {}", trunc(err_body.trim(), 300)));
+        }
+        Err(e) => return Err(format!("no response from model server at {} — is it running? ({e})", base())),
     };
     let reader = std::io::BufReader::new(resp.into_reader());
     let mut content = String::new();
@@ -427,20 +433,27 @@ fn chat_with_tools(messages: &[serde_json::Value], tools: &serde_json::Value) ->
             msg["content"] = serde_json::json!(content);
         }
     }
-    msg
+    Ok(msg)
 }
 
-/// Run the agent until it gives a final text answer / calls `done` / hits max_steps. Returns its summary.
+/// Run the agent until it gives a final text answer / calls `done` / hits max_steps. Returns its summary,
+/// or Err (already printed to stderr) if a model request failed — callers must not silently swallow that.
 fn run_agent_turn(
     messages: &mut Vec<serde_json::Value>,
     tools: &serde_json::Value,
     repo: &str,
     max_steps: usize,
     test: Option<&str>,
-) -> String {
+) -> Result<String, String> {
     let mut edited = false;
     for _ in 0..max_steps {
-        let msg = chat_with_tools(messages, tools);
+        let msg = match chat_with_tools(messages, tools) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("\x1b[31m✗ {e}\x1b[0m");
+                return Err(e);
+            }
+        };
         messages.push(msg.clone());
         match msg["tool_calls"].as_array() {
             Some(calls) if !calls.is_empty() => {
@@ -462,22 +475,22 @@ fn run_agent_turn(
                 }
                 if let Some(f) = finished {
                     println!("\x1b[32m  ✓ {f}\x1b[0m");
-                    return f;
+                    return Ok(f);
                 }
                 // Verifier-gated early termination: if the model has edited something and the tests now
                 // pass, we're verifiably done — don't wait for the model to remember to call `done`.
                 if edited {
                     if let Some(t) = test {
                         if run(t, repo).0 == 0 {
-                            return "verified — tests pass".to_string();
+                            return Ok("verified — tests pass".to_string());
                         }
                     }
                 }
             }
-            _ => return msg["content"].as_str().unwrap_or("").to_string(),
+            _ => return Ok(msg["content"].as_str().unwrap_or("").to_string()),
         }
     }
-    "(reached max steps)".to_string()
+    Ok("(reached max steps)".to_string())
 }
 
 fn agent_system(repo: &str) -> serde_json::Value {
@@ -507,15 +520,24 @@ fn cmd_do(task: &str, repo: &str, test: Option<String>, max_steps: usize) -> i32
     let mut messages = vec![agent_system(repo)];
     // seed the agent with callsieve-localized relevant code — better localization + fewer wandering
     // read/grep tool calls. Capped short: the model degrades on long context.
+    // Appended to the ONE system message, never pushed as a second one: the model's chat template
+    // raises "System message must be at the beginning." on any non-leading system message, and
+    // mlx_lm.server reports that template error as an HTTP 404.
     if let Ok(files) = callsieve_context(repo, task) {
         if !files.is_empty() {
             println!("\x1b[36m● callsieve seeded {} relevant file(s)\x1b[0m", files.len());
             let ctx: String = files.join("\n\n").chars().take(3000).collect();
-            messages.push(serde_json::json!({"role":"system","content":format!("Relevant repo code (callsieve-localized for the task):\n\n{ctx}")}));
+            let seeded = format!(
+                "{}\n\nRelevant repo code (callsieve-localized for the task):\n\n{ctx}",
+                messages[0]["content"].as_str().unwrap_or_default()
+            );
+            messages[0]["content"] = serde_json::json!(seeded);
         }
     }
     messages.push(serde_json::json!({"role":"user","content":task}));
-    run_agent_turn(&mut messages, &tools, repo, max_steps, test.as_deref()); // streams live
+    if run_agent_turn(&mut messages, &tools, repo, max_steps, test.as_deref()).is_err() {
+        return 1; // request failure — already printed to stderr by run_agent_turn
+    }
     if let Some(t) = test {
         let ok = run(&t, repo).0 == 0;
         println!("{}", if ok { "\x1b[32m✓ tests pass — verified\x1b[0m" } else { "\x1b[31m✗ tests fail\x1b[0m" });
@@ -546,7 +568,7 @@ fn repl(repo: &str) -> i32 {
             break;
         }
         messages.push(serde_json::json!({"role":"user","content":line}));
-        run_agent_turn(&mut messages, &tools, repo, 16, None); // streams live
+        let _ = run_agent_turn(&mut messages, &tools, repo, 16, None); // streams live; errors print to stderr
     }
     println!("bye 🐶");
     0
