@@ -40,6 +40,9 @@ enum Cmd {
         /// Git-commit the verified fix once it passes
         #[arg(long)]
         commit: bool,
+        /// Show each failing candidate's diff and test-failure tail, not just "still failing"
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Explain a file in plain language.
     Explain { file: String },
@@ -158,7 +161,7 @@ fn key_assertion(failure: &str) -> String {
     hits.into_iter().take(8).collect::<Vec<_>>().join("\n")
 }
 
-fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool) -> i32 {
+fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool, verbose: bool) -> i32 {
     let path = std::path::Path::new(file);
     let repo = repo.unwrap_or_else(|| match path.parent().and_then(|p| p.to_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -196,6 +199,12 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
         let cand = extract_code(&ask(&prompt, 0.2 + 0.2 * i as f64, 1400));
         if cand.is_empty() || cand.trim() == original.trim() {
             println!("  candidate {}: no change", i + 1);
+            if verbose {
+                println!(
+                    "\x1b[2m    (model returned {})\x1b[0m",
+                    if cand.is_empty() { "an empty response" } else { "the file unmodified" }
+                );
+            }
             continue;
         }
         let written = format!("{cand}\n");
@@ -217,6 +226,11 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
             }
             return 0;
         }
+        if verbose {
+            println!("  candidate {}: still failing — attempt:", i + 1);
+            show_diff(name, &original, &written);
+            println!("\x1b[2m    test output: {}\x1b[0m", tail(&fail2, 300).replace('\n', "\n    "));
+        }
         // #118 Reflexion: one self-critique retry feeding the failed attempt's NEW error back, before
         // spending the next independent candidate — cheap, and leverages the verifier signal directly.
         let reflect = format!(
@@ -228,7 +242,8 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
         if !cand2.is_empty() && cand2.trim() != written.trim() && cand2.trim() != original.trim() {
             let w2 = format!("{cand2}\n");
             let _ = fs::write(&fpath, &w2);
-            if run(test, &repo).0 == 0 {
+            let (rc_v2, fail3) = run(test, &repo);
+            if rc_v2 == 0 {
                 println!("\x1b[32m✓ candidate {} PASSES after Reflexion — verified fix applied:\x1b[0m", i + 1);
                 show_diff(name, &original, &w2);
                 if commit {
@@ -237,6 +252,13 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool)
                 }
                 return 0;
             }
+            if verbose {
+                println!("  candidate {} (reflexion): still failing — attempt:", i + 1);
+                show_diff(name, &original, &w2);
+                println!("\x1b[2m    test output: {}\x1b[0m", tail(&fail3, 300).replace('\n', "\n    "));
+            }
+        } else if verbose {
+            println!("  candidate {} (reflexion): no change from the reflexion prompt", i + 1);
         }
         println!("  candidate {}: still failing (incl. reflexion)", i + 1);
         let _ = fs::write(&fpath, &original); // revert before next try
@@ -465,7 +487,19 @@ fn agent_system(repo: &str) -> serde_json::Value {
          (you DO know about science, art, history, perfumery, design, etc. — never say you lack knowledge; \
          just answer helpfully). When the user wants work done on the code, use your tools (read_file, \
          list_dir, grep, write_file, run) to make real, verified changes, then call `done`. You have ONLY \
-         those local tools — no web access, so don't offer to search the web. Be concise and concrete.")})
+         those local tools — no web access, so don't offer to search the web. Be concise and concrete.\n\n\
+         --- THE METHOD (always on) ---\n\
+         You are a teammate, not an oracle. Take responsibility for outcomes — find the bug, fix it, prove the fix works, report plainly.\n\
+         Intent over instructions. Ground truth beats memory — never assert what a file contains without reading it.\n\
+         Calibrated confidence: 'verified,' 'likely,' and 'guessing' are three different claims. Say which.\n\
+         understand → act → verify → report. 'The code looks correct' is a hypothesis, not a result. Run the test.\n\
+         Use the cheapest tool that answers the question. Read the section, not all 4000 lines.\n\
+         Errors are information — the answer is usually in the error. Same approach failed 3 times → change strategy.\n\
+         Match the existing codebase's style, naming, idioms. Use installed libraries, not famous ones you assume exist.\n\
+         Minimal diff for the intended change. Note drive-by cleanups; don't do them.\n\
+         First sentence = what happened. Write for the person who stepped away.\n\
+         'Should work' means 'didn't check.' Say 'didn't check.'\n\
+         If your last paragraph is a plan or a promise, you're not done — go do the work.")})
 }
 
 fn cmd_do(task: &str, repo: &str, test: Option<String>, max_steps: usize) -> i32 {
@@ -553,7 +587,7 @@ fn main() {
         .unwrap_or_else(|| ".".into());
     let code = match Cli::parse().cmd {
         None => repl(&cwd),
-        Some(Cmd::Fix { file, test, n, repo, commit }) => cmd_fix(&file, &test, n, repo, commit),
+        Some(Cmd::Fix { file, test, n, repo, commit, verbose }) => cmd_fix(&file, &test, n, repo, commit, verbose),
         Some(Cmd::Explain { file }) => cmd_explain(&file),
         Some(Cmd::Do { task, repo, test, max_steps }) => cmd_do(&task, &repo, test, max_steps),
         Some(Cmd::Context { task, repo }) => cmd_context(&task, &repo),
