@@ -31,24 +31,13 @@ fn memory_path(repo: &str) -> PathBuf {
 /// memory yet for this repo" — callers reading history should treat that as zero hits, not an error.
 fn open_collection(repo: &str, create: bool) -> Result<Option<Collection>, String> {
     let path = memory_path(repo);
-    // vecstore's on-disk layout for a namespace named `fixes` is `<path>/fixes/`; check that
-    // directly rather than `path.exists()`, since `path` itself (the parent) now exists after any
-    // prior --memory run even if this specific collection doesn't.
-    let collection_dir = path.join(COLLECTION);
-    if !create && !collection_dir.exists() {
+    if !create && !path.join(COLLECTION).exists() {
         return Ok(None);
     }
     std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     let mut db = VecDatabase::open(&path).map_err(|e| e.to_string())?;
     match db.get_collection(COLLECTION).map_err(|e| e.to_string())? {
         Some(c) => Ok(Some(c)),
-        // vecstore's VecDatabase::open() starts with an empty in-memory namespace map — it never
-        // calls its own NamespaceManager::load_namespaces() to restore namespaces a PREVIOUS
-        // process created on disk (confirmed by reading vecstore's namespace_manager.rs). So
-        // get_collection() always misses here on a fresh process, even when `collection_dir`
-        // exists. create_collection() is the workaround: it re-registers the on-disk namespace,
-        // and its VecStore::open() call separately reloads the persisted vectors straight from
-        // disk — so this recovers existing data, it doesn't create an empty collection.
         None => Ok(Some(db.create_collection(COLLECTION).map_err(|e| e.to_string())?)),
     }
 }
