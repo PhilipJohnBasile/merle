@@ -48,6 +48,11 @@ library, so `cmd_do` gets task-relevant repo context without a separate service.
 compiles it *into* the single `merle` binary — no separate downloads, no Python runtime. Only the MLX
 model server runs as a separate local service.
 
+`merle` also bundles **vecstore** (embedded HNSW vector DB, no server) for opt-in fix-history memory:
+`merle fix --memory` remembers each verified (bug → diff) pair per-repo under `~/.merle/memory/`, and
+recalls similar past fixes as reference context on the next similar bug. Off by default — the first use
+downloads a small code-embedding model, a real one-time cost you shouldn't pay unless you ask for it.
+
 ## Install
 ```
 git clone <this repo> && cd merle
