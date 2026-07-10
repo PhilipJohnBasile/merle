@@ -17,7 +17,8 @@ ureq = { version = "2", features = ["json"] }
 serde_json = "1"
 similar = "2"
 # embedded siblings — bundled into the one merle binary
-callsieve = { path = "../callsieve" }
+callsieve = { path = "../callsieve", features = ["embed"] }
+vecstore = { path = "../vecstore" }
 
 [profile.release]
 opt-level = 3

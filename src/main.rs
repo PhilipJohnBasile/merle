@@ -12,6 +12,8 @@ use std::fs;
 use std::process::Command;
 use std::time::Duration;
 
+mod memory;
+
 fn base() -> String {
     std::env::var("MERLE_BASE").unwrap_or_else(|_| "http://localhost:8080/v1".into()) + "/chat/completions"
 }
@@ -43,6 +45,10 @@ enum Cmd {
         /// Show each failing candidate's diff and test-failure tail, not just "still failing"
         #[arg(short, long)]
         verbose: bool,
+        /// Remember verified fixes and recall similar past fixes in this repo (embedded vecstore;
+        /// first use downloads an embedding model). Off by default. Also: MERLE_MEMORY=1.
+        #[arg(long)]
+        memory: bool,
     },
     /// Explain a file in plain language.
     Explain { file: String },
@@ -125,9 +131,11 @@ fn tail(s: &str, n: usize) -> String {
     chars[chars.len().saturating_sub(n)..].iter().collect()
 }
 
-fn show_diff(name: &str, before: &str, after: &str) {
+/// Prints the colored diff and returns the plain (uncolored) text, for reuse as fix-history content.
+fn show_diff(name: &str, before: &str, after: &str) -> String {
     use similar::{ChangeTag, TextDiff};
     println!("--- a/{name}\n+++ b/{name}");
+    let mut plain = format!("--- a/{name}\n+++ b/{name}\n");
     for change in TextDiff::from_lines(before, after).iter_all_changes() {
         let (sign, color) = match change.tag() {
             ChangeTag::Delete => ("-", "\x1b[31m"),
@@ -135,7 +143,10 @@ fn show_diff(name: &str, before: &str, after: &str) {
             ChangeTag::Equal => (" ", "\x1b[0m"),
         };
         print!("{color}{sign}{change}\x1b[0m");
+        plain.push_str(sign);
+        plain.push_str(&change.to_string());
     }
+    plain
 }
 
 /// #113 fix-packet++: pull the most diagnostic lines (assertion + expected/actual) out of a test failure so
@@ -161,7 +172,7 @@ fn key_assertion(failure: &str) -> String {
     hits.into_iter().take(8).collect::<Vec<_>>().join("\n")
 }
 
-fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool, verbose: bool) -> i32 {
+fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool, verbose: bool, memory: bool) -> i32 {
     let path = std::path::Path::new(file);
     let repo = repo.unwrap_or_else(|| match path.parent().and_then(|p| p.to_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -190,10 +201,31 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool,
     let failure = tail(&run(test, &repo).1, 1200);
     let assertion = key_assertion(&failure);
     println!("\x1b[33m✗ failing. generating {n} candidates…\x1b[0m");
+    let memory_on = memory || std::env::var("MERLE_MEMORY").is_ok();
+    let history_block = if memory_on {
+        match memory::similar_fixes(&repo, &failure, 3) {
+            Ok(hits) if !hits.is_empty() => {
+                println!("\x1b[36m● memory: {} similar past fix(es) in this repo\x1b[0m", hits.len());
+                let joined: String = hits
+                    .iter()
+                    .map(|(diff, score)| format!("(similarity {score:.2})\n{}\n", tail(diff, 800)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("\n=== similar past fixes in this repo ===\n{joined}")
+            }
+            Ok(_) => String::new(),
+            Err(e) => {
+                eprintln!("\x1b[33m  (memory lookup skipped: {e})\x1b[0m");
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
     let prompt = format!(
         "This file fails its tests. Output ONLY the corrected full file, nothing else.\n\n\
          === {name} ===\n{original}\n\n=== test failure ===\n{failure}\n\
-         === THE EXACT FAILING ASSERTION (fix THIS condition — watch for flipped >/</>=/<=/==/!= and off-by-one) ===\n{assertion}\n"
+         === THE EXACT FAILING ASSERTION (fix THIS condition — watch for flipped >/</>=/<=/==/!= and off-by-one) ===\n{assertion}\n{history_block}"
     );
     for i in 0..n {
         let cand = extract_code(&ask(&prompt, 0.2 + 0.2 * i as f64, 1400));
@@ -212,7 +244,12 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool,
         let (rc_v, fail2) = run(test, &repo);
         if rc_v == 0 {
             println!("\x1b[32m✓ candidate {} PASSES — verified fix applied:\x1b[0m", i + 1);
-            show_diff(name, &original, &written);
+            let diff = show_diff(name, &original, &written);
+            if memory_on {
+                if let Err(e) = memory::record_fix(&repo, &failure, &diff) {
+                    eprintln!("\x1b[33m  (memory record skipped: {e})\x1b[0m");
+                }
+            }
             if commit {
                 let (rc, _) = run(&format!("git add {file} && git commit -q -m 'merle: verified fix'"), &repo);
                 println!(
@@ -228,7 +265,7 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool,
         }
         if verbose {
             println!("  candidate {}: still failing — attempt:", i + 1);
-            show_diff(name, &original, &written);
+            let _ = show_diff(name, &original, &written);
             println!("\x1b[2m    test output: {}\x1b[0m", tail(&fail2, 300).replace('\n', "\n    "));
         }
         // #118 Reflexion: one self-critique retry feeding the failed attempt's NEW error back, before
@@ -245,7 +282,12 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool,
             let (rc_v2, fail3) = run(test, &repo);
             if rc_v2 == 0 {
                 println!("\x1b[32m✓ candidate {} PASSES after Reflexion — verified fix applied:\x1b[0m", i + 1);
-                show_diff(name, &original, &w2);
+                let diff = show_diff(name, &original, &w2);
+                if memory_on {
+                    if let Err(e) = memory::record_fix(&repo, &failure, &diff) {
+                        eprintln!("\x1b[33m  (memory record skipped: {e})\x1b[0m");
+                    }
+                }
                 if commit {
                     let (rc, _) = run(&format!("git add {file} && git commit -q -m 'merle: verified fix (reflexion)'"), &repo);
                     println!("{}", if rc == 0 { "\x1b[32m  ✓ committed\x1b[0m" } else { "\x1b[33m  (commit skipped)\x1b[0m" });
@@ -254,7 +296,7 @@ fn cmd_fix(file: &str, test: &str, n: usize, repo: Option<String>, commit: bool,
             }
             if verbose {
                 println!("  candidate {} (reflexion): still failing — attempt:", i + 1);
-                show_diff(name, &original, &w2);
+                let _ = show_diff(name, &original, &w2);
                 println!("\x1b[2m    test output: {}\x1b[0m", tail(&fail3, 300).replace('\n', "\n    "));
             }
         } else if verbose {
@@ -682,7 +724,7 @@ fn main() {
         .unwrap_or_else(|| ".".into());
     let code = match Cli::parse().cmd {
         None => repl(&cwd),
-        Some(Cmd::Fix { file, test, n, repo, commit, verbose }) => cmd_fix(&file, &test, n, repo, commit, verbose),
+        Some(Cmd::Fix { file, test, n, repo, commit, verbose, memory }) => cmd_fix(&file, &test, n, repo, commit, verbose, memory),
         Some(Cmd::Explain { file }) => cmd_explain(&file),
         Some(Cmd::Do { task, repo, test, max_steps }) => cmd_do(&task, &repo, test, max_steps),
         Some(Cmd::Context { task, repo }) => cmd_context(&task, &repo),
